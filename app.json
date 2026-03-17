@@ -1,4 +1,11 @@
 {
-  "name": "rush",
-  "slug": "rush"
+  "expo": {
+    "name": "rush",
+    "slug": "rush",
+    "scheme": "rush",
+    "plugins": [
+      "expo-secure-store",
+      "expo-web-browser"
+    ]
+  }
 }

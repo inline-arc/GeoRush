@@ -1,0 +1,14 @@
+{
+  "name": "rush-privy-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "@privy-io/node": "^2.18.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
+
