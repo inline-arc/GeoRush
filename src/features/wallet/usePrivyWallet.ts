@@ -42,3 +42,5 @@ export function usePrivyWallet() {
   return { wallet, connected, busy, error, connect, disconnect, label };
 }
 
+export type WalletApi = ReturnType<typeof usePrivyWallet>;
+
