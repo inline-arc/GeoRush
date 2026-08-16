@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(npx expo install react-native-svg)",
+      "Shell(npm:*)",
+      "Shell(npx tsc --noEmit)",
+      "Shell(gh:*)",
+      "Shell(npx -y skills add starkience/strk20-agent-skills)",
+      "Shell(git:*)",
+      "Shell(git rm --cached .env && git add .gitignore && git commit -F - <<'EOF' Stop tracking .env and ignore it The .env file was committed publicly; environment secrets belong outside version control. Local .env file is preserved on disk. Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
