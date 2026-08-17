@@ -16,11 +16,12 @@ export type CommandItem = {
 type Props = {
   items: CommandItem[];
   style?: ViewStyle;
+  horizontal?: boolean;
 };
 
-export default function MapCommandBar({ items, style }: Props) {
+export default function MapCommandBar({ items, style, horizontal }: Props) {
   return (
-    <View style={[styles.bar, style]}>
+    <View style={[styles.bar, horizontal && styles.barHorizontal, style]}>
       {items.map((item, i) => {
         const Icon = item.icon;
         return (
@@ -32,7 +33,8 @@ export default function MapCommandBar({ items, style }: Props) {
             accessibilityLabel={item.label}
             style={({ pressed }) => [
               styles.chip,
-              i > 0 && styles.chipGap,
+              horizontal && styles.chipHorizontal,
+              i > 0 && (horizontal ? styles.chipGapH : styles.chipGap),
               item.active && styles.chipActive,
               item.disabled && styles.chipDisabled,
               pressed && !item.disabled && styles.chipPressed,
@@ -71,6 +73,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: 4,
   },
+  barHorizontal: {
+    flexDirection: "row",
+  },
   chip: {
     width: 56,
     minHeight: 48,
@@ -79,9 +84,17 @@ const styles = StyleSheet.create({
     gap: 4,
     paddingVertical: 6,
   },
+  chipHorizontal: {
+    width: 60,
+    minHeight: 44,
+  },
   chipGap: {
     borderTopWidth: 1,
     borderTopColor: colors.border,
+  },
+  chipGapH: {
+    borderLeftWidth: 1,
+    borderLeftColor: colors.border,
   },
   chipActive: {
     backgroundColor: colors.accentDim,

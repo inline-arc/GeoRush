@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Animated,
   Dimensions,
   Easing,
@@ -28,30 +29,30 @@ import {
 } from "lucide-react-native";
 import { colors, darkMapStyle, type } from "../theme/terminal";
 import Panel from "../components/terminal/Panel";
-import TerminalButton from "../components/terminal/TerminalButton";
 import TargetReticle from "../components/terminal/TargetReticle";
 import MapCommandBar from "../components/terminal/MapCommandBar";
+import CoinMarker from "../components/terminal/CoinMarker";
+import {
+  fetchRoute,
+  formatDuration,
+  haversineMeters,
+  nearestIndexOnRoute,
+  nextManeuver,
+  remainingAlongRoute,
+  type Point,
+  type Route,
+} from "../features/nav/routing";
 import type { WalletApi } from "../features/wallet/usePrivyWallet";
-
-type Point = { latitude: number; longitude: number };
 
 type Props = {
   walletApi: WalletApi;
 };
 
 const ZONE_RADIUS = 50;
-
-function haversineMeters(a: Point, b: Point): number {
-  const R = 6371000;
-  const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
-  const dLon = ((b.longitude - a.longitude) * Math.PI) / 180;
-  const la1 = (a.latitude * Math.PI) / 180;
-  const la2 = (b.latitude * Math.PI) / 180;
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-}
+const NAV_PITCH = 55;
+const NAV_ZOOM = 17.5;
+const REROUTE_DISTANCE = 80;
+const REROUTE_INTERVAL = 12000;
 
 function bearingDeg(a: Point, b: Point): number {
   const la1 = (a.latitude * Math.PI) / 180;
@@ -67,19 +68,49 @@ function formatDistance(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(2)}KM` : `${Math.round(m)}M`;
 }
 
-const MAP_TYPES = (
-  Platform.OS === "ios"
-    ? ["standard", "mutedStandard", "satellite", "hybrid", "terrain"]
-    : ["standard", "satellite", "hybrid", "terrain"]
-) as const;
-type MapType = (typeof MAP_TYPES)[number];
-const MAP_TYPE_LABELS: Record<MapType, string> = {
-  standard: "STD",
-  mutedStandard: "MUT",
-  satellite: "SAT",
-  hybrid: "HYB",
-  terrain: "TER",
+type MapViewDef = {
+  key: string;
+  label: string;
+  mapType: string;
+  pitch: number;
+  buildings: boolean;
+  dark: boolean;
 };
+
+const MAP_VIEWS: MapViewDef[] = [
+  { key: "standard", label: "STD", mapType: "standard", pitch: 0, buildings: false, dark: true },
+  ...(Platform.OS === "ios"
+    ? [{ key: "mutedStandard", label: "MUT", mapType: "mutedStandard", pitch: 0, buildings: false, dark: false }]
+    : []),
+  { key: "satellite", label: "SAT", mapType: "satellite", pitch: 0, buildings: false, dark: false },
+  { key: "hybrid", label: "HYB", mapType: "hybrid", pitch: 0, buildings: false, dark: false },
+  { key: "terrain", label: "TER", mapType: "terrain", pitch: 0, buildings: false, dark: false },
+  { key: "orbit", label: "3D", mapType: "standard", pitch: 45, buildings: true, dark: true },
+];
+
+type CoinPoint = Point & { key: string; phase: number };
+
+function scatterCoins(center: Point, latitudeDelta: number): CoinPoint[] {
+  const step = latitudeDelta / 2;
+  const qLat = Math.round(center.latitude / step) * step;
+  const qLon = Math.round(center.longitude / step) * step;
+  const count = 9;
+  const coins: CoinPoint[] = [];
+  for (let i = 0; i < count; i++) {
+    const seed =
+      Math.sin((qLat * 1000 + qLon * 1000) * (i + 3) * 12.9898) * 43758.5453;
+    const frac = seed - Math.floor(seed);
+    const angle = (i / count) * Math.PI * 2 + frac * 0.9;
+    const r = latitudeDelta * (0.1 + frac * 0.24);
+    coins.push({
+      key: `${i}:${qLat.toFixed(5)}:${qLon.toFixed(5)}`,
+      latitude: qLat + Math.cos(angle) * r,
+      longitude: qLon + Math.sin(angle) * r * 1.25,
+      phase: frac,
+    });
+  }
+  return coins;
+}
 
 export default function MapWithDrawer({ walletApi }: Props) {
   const screenH = Dimensions.get("window").height;
@@ -97,12 +128,28 @@ export default function MapWithDrawer({ walletApi }: Props) {
   const [hasLocationPermission, setHasLocationPermission] = useState(false);
   const [liveLocation, setLiveLocation] = useState<Point | null>(null);
   const [selectedPoint, setSelectedPoint] = useState<Point | null>(null);
-  const [mapType, setMapType] = useState<MapType>("standard");
+  const [viewIndex, setViewIndex] = useState(0);
   const [navActive, setNavActive] = useState(false);
+  const [route, setRoute] = useState<Route | null>(null);
+  const [routeError, setRouteError] = useState(false);
+  const [navFollow, setNavFollow] = useState(false);
+  const [arrived, setArrived] = useState(false);
+  const [navInfo, setNavInfo] = useState<{
+    remaining: number;
+    eta: number;
+    maneuverLabel: string;
+    maneuverDist: number;
+  } | null>(null);
+  const [zoomedOut, setZoomedOut] = useState(false);
+  const [coins, setCoins] = useState<CoinPoint[]>([]);
   const [aiming, setAiming] = useState(false);
   const aimingRef = useRef(false);
   const regionRef = useRef<Region | null>(null);
   const mapRef = useRef<MapView | null>(null);
+  const followRef = useRef(false);
+  const navSession = useRef(0);
+  const routeFetchRef = useRef<{ origin: Point; time: number } | null>(null);
+  const navTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const shockAnim = useRef(new Animated.Value(0)).current;
   const pingAnim = useRef(new Animated.Value(0)).current;
@@ -110,6 +157,8 @@ export default function MapWithDrawer({ walletApi }: Props) {
   const [ping, setPing] = useState<{ r: number; a: number } | null>(null);
 
   const { wallet, connected, busy, error, connect, disconnect } = walletApi;
+
+  const view = MAP_VIEWS[viewIndex];
 
   const setSheet = (open: boolean) => {
     const toValue = open ? SHEET_TOP : SHEET_COLLAPSED;
@@ -188,8 +237,10 @@ export default function MapWithDrawer({ walletApi }: Props) {
     };
   }, []);
 
+  const didInitialFix = useRef(false);
   useEffect(() => {
-    if (!liveLocation || !mapRef.current) return;
+    if (!liveLocation || !mapRef.current || didInitialFix.current) return;
+    didInitialFix.current = true;
     mapRef.current.animateToRegion(
       {
         ...liveLocation,
@@ -231,9 +282,7 @@ export default function MapWithDrawer({ walletApi }: Props) {
     };
   }, [selectedPoint, pingAnim]);
 
-  const dropPin = (pt: Point) => {
-    setSelectedPoint(pt);
-    setNavActive(false);
+  const pulseShock = () => {
     shockAnim.setValue(0);
     setShock({ r: 0, a: 0.7 });
     Animated.timing(shockAnim, {
@@ -244,6 +293,27 @@ export default function MapWithDrawer({ walletApi }: Props) {
     }).start(({ finished }) => {
       if (finished) setShock(null);
     });
+  };
+
+  const clearNav = () => {
+    navSession.current += 1;
+    if (navTimer.current) {
+      clearTimeout(navTimer.current);
+      navTimer.current = null;
+    }
+    setNavActive(false);
+    setRoute(null);
+    setNavInfo(null);
+    setRouteError(false);
+    followRef.current = false;
+    setNavFollow(false);
+  };
+
+  const dropPin = (pt: Point) => {
+    setSelectedPoint(pt);
+    setArrived(false);
+    clearNav();
+    pulseShock();
   };
 
   const onMapPress = (e: any) => {
@@ -261,40 +331,116 @@ export default function MapWithDrawer({ walletApi }: Props) {
     }
   };
 
-  const onCycleMapType = () => {
-    const idx = MAP_TYPES.indexOf(mapType);
-    setMapType(MAP_TYPES[(idx + 1) % MAP_TYPES.length]);
+  const onCycleView = () => {
+    const nextIndex = (viewIndex + 1) % MAP_VIEWS.length;
+    setViewIndex(nextIndex);
+    const next = MAP_VIEWS[nextIndex];
+    if (!navActive && mapRef.current) {
+      mapRef.current.animateCamera(
+        { pitch: next.pitch },
+        { duration: 500 }
+      );
+    }
   };
 
   const onRecenter = () => {
+    if (navActive && liveLocation && mapRef.current) {
+      followRef.current = true;
+      setNavFollow(true);
+      const heading = selectedPoint
+        ? bearingDeg(liveLocation, selectedPoint)
+        : 0;
+      mapRef.current.animateCamera(
+        { center: liveLocation, heading, pitch: NAV_PITCH, zoom: NAV_ZOOM },
+        { duration: 700 }
+      );
+      return;
+    }
     const target = liveLocation ?? selectedPoint;
     if (!target || !mapRef.current) return;
-    mapRef.current.animateToRegion(
-      { ...target, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-      500
+    mapRef.current.animateCamera(
+      { center: target, pitch: view.pitch, zoom: 15.5 },
+      { duration: 500 }
     );
+  };
+
+  const startNav = async () => {
+    if (!selectedPoint || !liveLocation) return;
+    const session = ++navSession.current;
+    setNavActive(true);
+    setArrived(false);
+    setRouteError(false);
+    setNavInfo(null);
+
+    mapRef.current?.fitToCoordinates([liveLocation, selectedPoint], {
+      edgePadding: {
+        top: 160,
+        bottom: Math.round(screenH * 0.34),
+        left: 70,
+        right: 70,
+      },
+      animated: true,
+    });
+
+    try {
+      const r = await fetchRoute(liveLocation, selectedPoint);
+      if (navSession.current !== session) return;
+      routeFetchRef.current = { origin: liveLocation, time: Date.now() };
+      setRoute(r);
+      const nm = nextManeuver(r.maneuvers, liveLocation);
+      setNavInfo({
+        remaining: r.distance,
+        eta: r.duration,
+        maneuverLabel: nm?.label ?? "FOLLOW ROUTE",
+        maneuverDist: nm?.distance ?? r.distance,
+      });
+    } catch {
+      if (navSession.current !== session) return;
+      setRoute(null);
+      setRouteError(true);
+    }
+
+    navTimer.current = setTimeout(() => {
+      if (navSession.current !== session) return;
+      followRef.current = true;
+      setNavFollow(true);
+      mapRef.current?.animateCamera(
+        {
+          center: liveLocation,
+          heading: bearingDeg(liveLocation, selectedPoint),
+          pitch: NAV_PITCH,
+          zoom: NAV_ZOOM,
+        },
+        { duration: 900 }
+      );
+    }, 1100);
+  };
+
+  const stopNav = () => {
+    clearNav();
+    mapRef.current?.animateCamera({ pitch: view.pitch }, { duration: 600 });
+  };
+
+  const arrive = () => {
+    clearNav();
+    setArrived(true);
+    pulseShock();
+    mapRef.current?.animateCamera({ pitch: 0, zoom: 16.5 }, { duration: 700 });
   };
 
   const onToggleNav = () => {
     if (!selectedPoint) return;
-    const next = !navActive;
-    setNavActive(next);
-    if (next && liveLocation && mapRef.current) {
-      mapRef.current.fitToCoordinates([liveLocation, selectedPoint], {
-        edgePadding: {
-          top: 140,
-          bottom: Math.round(screenH * 0.32),
-          left: 70,
-          right: 70,
-        },
-        animated: true,
-      });
+    if (navActive) {
+      stopNav();
+    } else {
+      startNav();
     }
   };
 
   const onClearTarget = () => {
     setSelectedPoint(null);
-    setNavActive(false);
+    setArrived(false);
+    clearNav();
   };
 
   const onConnectPress = async () => {
@@ -302,9 +448,71 @@ export default function MapWithDrawer({ walletApi }: Props) {
       await disconnect();
       return;
     }
-    const w = await connect();
-    if (w) setSheet(true);
+    await connect();
   };
+
+  useEffect(() => {
+    if (!navActive || !liveLocation || !selectedPoint) return;
+
+    const distToTarget = haversineMeters(liveLocation, selectedPoint);
+    if (distToTarget <= ZONE_RADIUS) {
+      arrive();
+      return;
+    }
+
+    if (route && route.geometry.length > 1) {
+      const idx = nearestIndexOnRoute(route.geometry, liveLocation);
+      const remaining =
+        haversineMeters(liveLocation, route.geometry[idx]) +
+        remainingAlongRoute(route.geometry, idx);
+      const eta =
+        route.duration * Math.min(1, remaining / Math.max(route.distance, 1));
+      const nm = nextManeuver(route.maneuvers, liveLocation);
+      setNavInfo({
+        remaining,
+        eta,
+        maneuverLabel: nm?.label ?? "FOLLOW ROUTE",
+        maneuverDist: nm?.distance ?? distToTarget,
+      });
+
+      const last = routeFetchRef.current;
+      if (
+        last &&
+        Date.now() - last.time > REROUTE_INTERVAL &&
+        haversineMeters(liveLocation, last.origin) > REROUTE_DISTANCE
+      ) {
+        routeFetchRef.current = { origin: liveLocation, time: Date.now() };
+        fetchRoute(liveLocation, selectedPoint)
+          .then((r) => setRoute(r))
+          .catch(() => {});
+      }
+    } else {
+      setNavInfo({
+        remaining: distToTarget,
+        eta: distToTarget / 1.4,
+        maneuverLabel: "DIRECT LINE",
+        maneuverDist: distToTarget,
+      });
+    }
+
+    if (followRef.current && mapRef.current) {
+      mapRef.current.animateCamera(
+        {
+          center: liveLocation,
+          heading: bearingDeg(liveLocation, selectedPoint),
+          pitch: NAV_PITCH,
+          zoom: NAV_ZOOM,
+        },
+        { duration: 900 }
+      );
+    }
+  }, [liveLocation]);
+
+  useEffect(() => {
+    return () => {
+      if (navTimer.current) clearTimeout(navTimer.current);
+    };
+  }, []);
 
   const hudPoint = selectedPoint ?? liveLocation;
   const distance =
@@ -326,6 +534,12 @@ export default function MapWithDrawer({ walletApi }: Props) {
           ref={mapRef}
           style={StyleSheet.absoluteFill}
           onPress={onMapPress}
+          onPanDrag={() => {
+            if (followRef.current) {
+              followRef.current = false;
+              setNavFollow(false);
+            }
+          }}
           onRegionChange={(r) => {
             regionRef.current = r;
             if (!aimingRef.current) {
@@ -337,11 +551,30 @@ export default function MapWithDrawer({ walletApi }: Props) {
             regionRef.current = r;
             aimingRef.current = false;
             setAiming(false);
+            setZoomedOut((prev) =>
+              r.latitudeDelta > 0.025 ? true : r.latitudeDelta < 0.016 ? false : prev
+            );
+            if (r.latitudeDelta > 0.025) {
+              setCoins(
+                scatterCoins(
+                  { latitude: r.latitude, longitude: r.longitude },
+                  r.latitudeDelta
+                )
+              );
+            }
           }}
           showsUserLocation={hasLocationPermission}
           showsMyLocationButton
-          mapType={mapType}
-          customMapStyle={mapType === "standard" ? darkMapStyle : undefined}
+          showsCompass={Platform.OS === "ios"}
+          showsPointsOfInterest={false}
+          showsBuildings={view.buildings}
+          pitchEnabled
+          rotateEnabled
+          toolbarEnabled={false}
+          moveOnMarkerPress={false}
+          loadingEnabled
+          mapType={view.mapType as any}
+          customMapStyle={view.dark ? darkMapStyle : undefined}
           userInterfaceStyle="dark"
         >
           {selectedPoint ? (
@@ -349,8 +582,12 @@ export default function MapWithDrawer({ walletApi }: Props) {
               <Circle
                 center={selectedPoint}
                 radius={ZONE_RADIUS}
-                strokeColor={colors.accentBorder}
-                fillColor="rgba(61, 255, 136, 0.05)"
+                strokeColor={arrived ? colors.warn : colors.accentBorder}
+                fillColor={
+                  arrived
+                    ? "rgba(255, 178, 36, 0.08)"
+                    : "rgba(61, 255, 136, 0.05)"
+                }
                 strokeWidth={1}
               />
               {ping ? (
@@ -386,7 +623,26 @@ export default function MapWithDrawer({ walletApi }: Props) {
               </Marker>
             </>
           ) : null}
-          {navActive && liveLocation && selectedPoint ? (
+
+          {navActive && liveLocation && selectedPoint && route ? (
+            <>
+              <Polyline
+                coordinates={route.geometry}
+                strokeColor={colors.black}
+                strokeWidth={8}
+                lineJoin="round"
+                lineCap="round"
+              />
+              <Polyline
+                coordinates={route.geometry}
+                strokeColor={colors.accent}
+                strokeWidth={4}
+                lineJoin="round"
+                lineCap="round"
+              />
+            </>
+          ) : null}
+          {navActive && liveLocation && selectedPoint && !route ? (
             <Polyline
               coordinates={[liveLocation, selectedPoint]}
               strokeColor={colors.accent}
@@ -394,6 +650,34 @@ export default function MapWithDrawer({ walletApi }: Props) {
               lineDashPattern={[10, 8]}
             />
           ) : null}
+
+          {zoomedOut && !navActive
+            ? coins.map((c) => (
+                <Marker
+                  key={c.key}
+                  coordinate={{
+                    latitude: c.latitude,
+                    longitude: c.longitude,
+                  }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  tracksViewChanges
+                  onPress={() => {
+                    dropPin({ latitude: c.latitude, longitude: c.longitude });
+                    mapRef.current?.animateToRegion(
+                      {
+                        latitude: c.latitude,
+                        longitude: c.longitude,
+                        latitudeDelta: 0.01,
+                        longitudeDelta: 0.01,
+                      },
+                      600
+                    );
+                  }}
+                >
+                  <CoinMarker phase={c.phase} />
+                </Marker>
+              ))
+            : null}
         </MapView>
 
         <TargetReticle aiming={aiming} locked={!!selectedPoint} />
@@ -410,20 +694,96 @@ export default function MapWithDrawer({ walletApi }: Props) {
             </View>
             <View style={styles.hudChip}>
               <View
-                style={[styles.dot, navActive && { backgroundColor: colors.warn }]}
+                style={[
+                  styles.dot,
+                  navActive && { backgroundColor: colors.warn },
+                  arrived && { backgroundColor: colors.warn },
+                ]}
               />
               <Text style={styles.hudText}>
-                {navActive
-                  ? "NAV ACTIVE"
-                  : selectedPoint
-                    ? "TARGET LOCKED"
-                    : aiming
-                      ? "AIMING"
-                      : "TRACKING"}
+                {arrived
+                  ? "ZONE ENTERED"
+                  : navActive
+                    ? "NAV ACTIVE"
+                    : selectedPoint
+                      ? "TARGET LOCKED"
+                      : aiming
+                        ? "AIMING"
+                        : "TRACKING"}
               </Text>
             </View>
           </View>
         </View>
+
+        <MapCommandBar
+          horizontal
+          style={styles.commandBar}
+          items={[
+            {
+              key: "mark",
+              icon: Crosshair,
+              label: "MARK",
+              onPress: onMarkAtCenter,
+            },
+            {
+              key: "view",
+              icon: Layers,
+              label: view.label,
+              onPress: onCycleView,
+              active: viewIndex !== 0,
+            },
+            {
+              key: "center",
+              icon: LocateFixed,
+              label: navActive ? (navFollow ? "LOCK" : "FOLLOW") : "CENTER",
+              onPress: onRecenter,
+              active: navActive && navFollow,
+            },
+          ]}
+        />
+
+        {navActive && navInfo ? (
+          <View style={styles.navBanner}>
+            <View style={styles.navManeuver}>
+              <View style={styles.navArrow}>
+                <Navigation size={16} color={colors.black} />
+              </View>
+              <View style={styles.navTextWrap}>
+                <Text style={styles.navInstruction} numberOfLines={1}>
+                  {navInfo.maneuverLabel}
+                </Text>
+                <Text style={styles.navSub}>
+                  {formatDistance(navInfo.maneuverDist)}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.navMeta}>
+              <Text style={styles.navEta}>{formatDuration(navInfo.eta)}</Text>
+              <Text style={styles.navSub}>
+                {formatDistance(navInfo.remaining)} LEFT
+              </Text>
+            </View>
+            <Pressable
+              onPress={stopNav}
+              style={({ pressed }) => [
+                styles.navClose,
+                pressed && styles.chipPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="END NAVIGATION"
+            >
+              <X size={14} color={colors.danger} />
+            </Pressable>
+          </View>
+        ) : null}
+
+        {routeError && navActive ? (
+          <View style={styles.routeWarn} pointerEvents="none">
+            <Text style={styles.routeWarnText}>
+              OFF-GRID — DIRECT LINE ROUTING
+            </Text>
+          </View>
+        ) : null}
       </View>
 
       <KeyboardAvoidingView
@@ -449,38 +809,18 @@ export default function MapWithDrawer({ walletApi }: Props) {
           />
         </Animated.View>
 
-        {!sheetOpen ? (
-          <MapCommandBar
-            style={{ position: "absolute", right: 12, bottom: overlayBottom }}
-            items={[
-              {
-                key: "mark",
-                icon: Crosshair,
-                label: "MARK",
-                onPress: onMarkAtCenter,
-              },
-              {
-                key: "view",
-                icon: Layers,
-                label: MAP_TYPE_LABELS[mapType],
-                onPress: onCycleMapType,
-                active: mapType !== "standard",
-              },
-              {
-                key: "center",
-                icon: LocateFixed,
-                label: "CENTER",
-                onPress: onRecenter,
-              },
-            ]}
-          />
-        ) : null}
-
         {!sheetOpen && selectedPoint ? (
           <View style={[styles.targetChip, { bottom: overlayBottom }]}>
             <View style={styles.targetHeader}>
-              <Crosshair size={11} color={colors.accent} />
-              <Text style={styles.targetTitle}>TARGET LOCKED</Text>
+              <Crosshair
+                size={11}
+                color={arrived ? colors.warn : colors.accent}
+              />
+              <Text
+                style={[styles.targetTitle, arrived && { color: colors.warn }]}
+              >
+                {arrived ? "ZONE ENTERED" : "TARGET LOCKED"}
+              </Text>
               <Text style={styles.targetZone}>R {ZONE_RADIUS}M</Text>
             </View>
             <Text style={styles.targetCoords}>
@@ -493,30 +833,33 @@ export default function MapWithDrawer({ walletApi }: Props) {
                 : "NO SIGNAL — DIST UNAVAILABLE"}
             </Text>
             <View style={styles.targetActions}>
-              <Pressable
-                onPress={onToggleNav}
-                disabled={!liveLocation}
-                style={({ pressed }) => [
-                  styles.navBtn,
-                  navActive && styles.navBtnActive,
-                  !liveLocation && styles.chipDisabled,
-                  pressed && styles.chipPressed,
-                ]}
-              >
-                <Navigation
-                  size={12}
-                  color={navActive ? colors.black : colors.accent}
-                />
-                <Text
-                  style={[styles.navBtnText, navActive && styles.navBtnTextActive]}
+              {!arrived ? (
+                <Pressable
+                  onPress={onToggleNav}
+                  disabled={!liveLocation}
+                  style={({ pressed }) => [
+                    styles.navBtn,
+                    navActive && styles.navBtnActive,
+                    !liveLocation && styles.chipDisabled,
+                    pressed && styles.chipPressed,
+                  ]}
                 >
-                  {navActive ? "END NAV" : "NAV START"}
-                </Text>
-              </Pressable>
+                  <Navigation
+                    size={12}
+                    color={navActive ? colors.black : colors.accent}
+                  />
+                  <Text
+                    style={[styles.navBtnText, navActive && styles.navBtnTextActive]}
+                  >
+                    {navActive ? "END NAV" : "NAV START"}
+                  </Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 onPress={onClearTarget}
                 style={({ pressed }) => [
                   styles.clearBtn,
+                  arrived && { flex: 1 },
                   pressed && styles.chipPressed,
                 ]}
               >
@@ -538,10 +881,44 @@ export default function MapWithDrawer({ walletApi }: Props) {
           </View>
 
           <View style={styles.sheetContent}>
-            <View style={styles.balanceBlock}>
-              <Text style={styles.micro}>AVAILABLE BALANCE</Text>
-              <Text style={styles.balanceValue}>$2.78</Text>
-              <Text style={styles.balanceSub}>Add funds to arm the grid</Text>
+            <View style={styles.balanceRow}>
+              <View style={styles.balanceBlock}>
+                <Text style={styles.micro}>AVAILABLE BALANCE</Text>
+                <Text style={styles.balanceValue}>$2.78</Text>
+                <Text style={styles.balanceSub}>Add funds to arm the grid</Text>
+              </View>
+              <Pressable
+                onPress={onConnectPress}
+                disabled={busy}
+                style={({ pressed }) => [
+                  styles.connectBtn,
+                  connected && styles.connectBtnLinked,
+                  pressed && !busy && styles.chipPressed,
+                  busy && styles.chipDisabled,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel={connected ? "DISCONNECT WALLET" : "CONNECT WALLET"}
+              >
+                {busy ? (
+                  <ActivityIndicator size="small" color={colors.accent} />
+                ) : (
+                  <>
+                    {connected ? (
+                      <Power size={12} color={colors.danger} />
+                    ) : (
+                      <Wallet size={12} color={colors.accent} />
+                    )}
+                    <Text
+                      style={[
+                        styles.connectBtnText,
+                        connected && styles.connectBtnTextLinked,
+                      ]}
+                    >
+                      {connected ? "UNLINK" : "CONNECT"}
+                    </Text>
+                  </>
+                )}
+              </Pressable>
             </View>
 
             <Panel
@@ -599,22 +976,6 @@ export default function MapWithDrawer({ walletApi }: Props) {
             </Panel>
           </View>
         </Animated.View>
-
-        <View style={styles.connectBar} pointerEvents="box-none">
-          <TerminalButton
-            title={connected ? "TERMINATE LINK" : "CONNECT WALLET"}
-            onPress={onConnectPress}
-            loading={busy}
-            variant={connected ? "danger" : "primary"}
-            icon={
-              connected ? (
-                <Power size={15} color={colors.danger} />
-              ) : (
-                <Wallet size={15} color={colors.black} />
-              )
-            }
-          />
-        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -654,6 +1015,83 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     backgroundColor: colors.accent,
+  },
+  commandBar: {
+    position: "absolute",
+    top: 52,
+    left: 12,
+  },
+  navBanner: {
+    position: "absolute",
+    top: 112,
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "rgba(4, 7, 10, 0.92)",
+    borderWidth: 1,
+    borderColor: colors.accentBorder,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  navManeuver: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  navArrow: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+  },
+  navTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  navInstruction: {
+    ...type.label,
+    fontSize: 13,
+    color: colors.text,
+  },
+  navSub: {
+    ...type.micro,
+    fontSize: 9,
+  },
+  navMeta: {
+    alignItems: "flex-end",
+    gap: 2,
+  },
+  navEta: {
+    ...type.data,
+    fontSize: 14,
+    color: colors.accent,
+  },
+  navClose: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+  },
+  routeWarn: {
+    position: "absolute",
+    top: 162,
+    alignSelf: "center",
+    backgroundColor: "rgba(4, 7, 10, 0.9)",
+    borderWidth: 1,
+    borderColor: colors.warn,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  routeWarnText: {
+    ...type.micro,
+    fontSize: 9,
+    color: colors.warn,
   },
   targetMarker: {
     width: MK,
@@ -798,11 +1236,18 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     gap: 14,
   },
-  balanceBlock: {
-    gap: 4,
+  balanceRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+  },
+  balanceBlock: {
+    flex: 1,
+    gap: 4,
   },
   micro: {
     ...type.micro,
@@ -817,6 +1262,32 @@ const styles = StyleSheet.create({
     ...type.body,
     fontSize: 12,
     color: colors.textMuted,
+  },
+  connectBtn: {
+    height: 40,
+    minWidth: 118,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    borderWidth: 1,
+    borderColor: colors.accentBorder,
+    backgroundColor: colors.accentDim,
+    marginTop: 4,
+  },
+  connectBtnLinked: {
+    backgroundColor: "transparent",
+    borderColor: colors.borderStrong,
+  },
+  connectBtnText: {
+    ...type.label,
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.accent,
+  },
+  connectBtnTextLinked: {
+    color: colors.danger,
   },
   walletChip: {
     flexDirection: "row",
@@ -871,17 +1342,5 @@ const styles = StyleSheet.create({
     ...type.micro,
     color: colors.textFaint,
     marginTop: 10,
-  },
-  connectBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 16,
-    paddingBottom: Platform.OS === "ios" ? 24 : 16,
-    paddingTop: 10,
-    backgroundColor: "rgba(4, 7, 10, 0.92)",
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
   },
 });
