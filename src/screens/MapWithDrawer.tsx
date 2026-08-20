@@ -42,7 +42,7 @@ import {
   type Point,
   type Route,
 } from "../features/nav/routing";
-import type { WalletApi } from "../features/wallet/usePrivyWallet";
+import type { WalletApi } from "../features/wallet/api";
 
 type Props = {
   walletApi: WalletApi;

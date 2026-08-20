@@ -22,7 +22,7 @@ import BootLog from "../components/terminal/BootLog";
 import Panel from "../components/terminal/Panel";
 import ScanGrid from "../components/terminal/ScanGrid";
 import TerminalButton from "../components/terminal/TerminalButton";
-import type { WalletApi } from "../features/wallet/usePrivyWallet";
+import type { WalletApi } from "../features/wallet/api";
 
 const BOOT_LINES = [
   { text: "INITIALIZING GEORUSH TERMINAL v1.0.4", status: "ok" as const },

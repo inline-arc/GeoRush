@@ -1,0 +1,18 @@
+[package]
+name = "blitz_escrow"
+version = "0.1.0"
+edition = "2024_07"
+description = "BlitzEscrow: a STRK20 anonymizer escrow for GeoRush"
+repository = "https://github.com/inline-arc/GeoRush"
+license = "Apache-2.0"
+
+[dependencies]
+starknet = ">=2.10.0"
+openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git", rev = "v0.20.0" }
+privacy = { git = "https://github.com/starkware-libs/starknet-privacy.git", rev = "v2.0.0" }
+
+[dev-dependencies]
+snforge_std = ">=0.32.0"
+
+[scripts]
+test = "snforge test"

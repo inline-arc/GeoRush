@@ -7,7 +7,19 @@
       "Shell(gh:*)",
       "Shell(npx -y skills add starkience/strk20-agent-skills)",
       "Shell(git:*)",
-      "Shell(git rm --cached .env && git add .gitignore && git commit -F - <<'EOF' Stop tracking .env and ignore it The .env file was committed publicly; environment secrets belong outside version control. Local .env file is preserved on disk. Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)"
+      "Shell(git rm --cached .env && git add .gitignore && git commit -F - <<'EOF' Stop tracking .env and ignore it The .env file was committed publicly; environment secrets belong outside version control. Local .env file is preserved on disk. Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)",
+      "powershell",
+      "Shell(dir /b node_modules 2>nul | findstr starknet)",
+      "Shell(node -e \"const s = require('starknet'); console.log('WalletAccountV6:', typeof s.WalletAccountV6); console.log('keys with V6:', Object.keys(s).filter(k => k.includes('V6')));\" 2>&1)",
+      "Shell(node -e \"require.resolve('@starknet-io/get-starknet-wallet-standard'); console.log('get-starknet: OK');\" 2>&1)",
+      "Shell(node -e \"require.resolve('@starknet-io/types-js'); console.log('types-js: OK');\" 2>&1)",
+      "Shell(type:*)",
+      "Shell(findstr:*)",
+      "Shell(node -e \"const p = require('./node_modules/starknet/package.json'); console.log(JSON.stringify(p.exports, null, 2)); console.log('main:', p.main); console.log('module:', p.module);\" 2>&1)",
+      "Shell(pnpm:*)",
+      "Shell(Select-String:*)",
+      "Shell(kill 22012 2>nul; echo done)",
+      "Shell(node -e \"const p = require('./node_modules/starknet/package.json'); const fs = require('fs'); const entry = p.main; const content = fs.readFileSync('./node_modules/starknet/' + entry, 'utf8').slice(0, 2000); console.log(content);\" 2>&1)"
     ],
     "deny": [],
     "defaultMode": "default"

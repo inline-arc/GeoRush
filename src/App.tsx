@@ -1,8 +1,8 @@
 import React from "react";
 import MapWithDrawer from "./screens/MapWithDrawer";
-import { usePrivyWallet } from "./features/wallet/usePrivyWallet";
+import { useStarknetWallet } from "./features/wallet/useStarknetWallet";
 
 export default function App() {
-  const walletApi = usePrivyWallet();
+  const walletApi = useStarknetWallet();
   return <MapWithDrawer walletApi={walletApi} />;
 }

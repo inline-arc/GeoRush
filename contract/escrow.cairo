@@ -1,6 +1,14 @@
-// Original example written for strk20-by-example. Unlike the other helpers here,
-// this is NOT adapted from the starknet-privacy monorepo - that repo ships no
-// escrow package. Unofficial, and not reviewed or audited by StarkWare.
+// BlitzEscrow: a stateful STRK20 anonymizer (helper) contract for GeoRush.
+//
+// Unlike the stateless swap/Vesu helpers, this contract keeps its own commitment map
+// so funds can be escrowed behind a secret and claimed later — even by someone who
+// is not yet registered with the privacy pool.
+//
+// The privacy pool calls `privacy_invoke` via the protocol's INVOKE_SELECTOR during
+// InvokeExternal. The pool first withdraws tokens to this contract, then calls
+// privacy_invoke, then credits the returned Span<OpenNoteDeposit> back into open notes.
+//
+// This is an unofficial example, not reviewed or audited by StarkWare.
 use privacy::objects::OpenNoteDeposit;
 use starknet::ContractAddress;
 
@@ -20,8 +28,9 @@ pub enum EscrowOperation {
 }
 
 #[starknet::interface]
-pub trait IEscrow<T> {
-    /// Returns the commitment entry for a given hash. All fields are zero if it does not exist.
+pub trait IBlitzEscrow<T> {
+    /// Returns the commitment entry for a given hash.
+    /// All fields are zero if it does not exist.
     fn get_commitment(self: @T, commitment_hash: felt252) -> CommitmentEntry;
 
     /// Called by the privacy contract via the `INVOKE_SELECTOR`.
@@ -70,7 +79,7 @@ pub fn compute_commitment_hash(secret: felt252) -> felt252 {
 }
 
 #[starknet::contract]
-pub mod Escrow {
+pub mod BlitzEscrow {
     use core::num::traits::Zero;
     use openzeppelin::interfaces::token::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
     use privacy::objects::OpenNoteDeposit;
@@ -78,8 +87,10 @@ pub mod Escrow {
         StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
-    use starknet::{ContractAddress, get_caller_address};
-    use super::{CommitmentEntry, EscrowOperation, IEscrow, compute_commitment_hash, errors};
+    use starknet::get_caller_address;
+    use super::{
+        CommitmentEntry, EscrowOperation, IBlitzEscrow, compute_commitment_hash, errors,
+    };
 
     #[storage]
     struct Storage {
@@ -92,8 +103,30 @@ pub mod Escrow {
         self.privacy_contract.write(privacy_contract);
     }
 
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    pub enum Event {
+        EscrowDeposit: EscrowDeposit,
+        EscrowClaim: EscrowClaim,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct EscrowDeposit {
+        pub commitment_hash: felt252,
+        pub token: ContractAddress,
+        pub amount: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct EscrowClaim {
+        pub commitment_hash: felt252,
+        pub token: ContractAddress,
+        pub amount: u128,
+        pub note_id: felt252,
+    }
+
     #[abi(embed_v0)]
-    pub impl EscrowImpl of IEscrow<ContractState> {
+    pub impl BlitzEscrowImpl of IBlitzEscrow<ContractState> {
         fn get_commitment(self: @ContractState, commitment_hash: felt252) -> CommitmentEntry {
             self.commitments.read(commitment_hash)
         }
@@ -126,7 +159,19 @@ pub mod Escrow {
                             CommitmentEntry { token, amount, claimed: false },
                         );
 
-                    // Tokens already transferred by the pool via Withdraw. Return empty span.
+                    self
+                        .emit(
+                            Event::EscrowDeposit(
+                                EscrowDeposit {
+                                    commitment_hash,
+                                    token,
+                                    amount,
+                                },
+                            ),
+                        );
+
+                    // Tokens already transferred by the pool via Withdraw.
+                    // Return empty span so the pool credits nothing yet.
                     [].span()
                 },
                 EscrowOperation::Claim => {
@@ -146,10 +191,22 @@ pub mod Escrow {
                     IERC20Dispatcher { contract_address: entry.token }
                         .approve(spender: privacy_addr, amount: entry.amount.into());
 
+                    self
+                        .emit(
+                            Event::EscrowClaim(
+                                EscrowClaim {
+                                    commitment_hash,
+                                    token: entry.token,
+                                    amount: entry.amount,
+                                    note_id,
+                                },
+                            ),
+                        );
+
+                    // Tell the pool to credit the open note with the escrowed tokens.
                     [OpenNoteDeposit { note_id, token: entry.token, amount: entry.amount }].span()
                 },
             }
         }
     }
 }
-
